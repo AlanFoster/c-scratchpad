@@ -1,5 +1,4 @@
-cmake_minimum_required(VERSION 3.1)
-project(TestApp)
+cmake_minimum_required(VERSION 3.12)
+project(Scratchpad)
 
-file(GLOB SRC_FILES "src/*.c")
-add_executable(scratchpad ${SRC_FILES})
+add_subdirectory(scratchpad)
