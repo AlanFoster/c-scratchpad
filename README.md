@@ -53,6 +53,11 @@ In visual studio:
 - ctrl+shift+p - `Cmake: Configure`
 - In the new CMake tab, right click `tests.exe` then select `Build`, and then `Run in Terminal`
 
+### What's present?
+
+- [CMake](https://cmake.org/) setup, with [catch2](https://github.com/catchorg/Catch2) for unit tests
+- Simple VirtualAllocEx shellcode injection technique, will inject into either the given pid or will attempt to search and inject into a running notepad process
+
 ### Resources
 
 - https://cliutils.gitlab.io/modern-cmake/
