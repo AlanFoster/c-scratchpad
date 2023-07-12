@@ -5,5 +5,14 @@
 file(GLOB SRC_FILES CONFIGURE_DEPENDS "../src/*.c" "../src/*.cpp")
 file(GLOB HEADER_FILES CONFIGURE_DEPENDS "../include/*.h")
 
+# Scratchpad - include everything
 add_executable(scratchpad scratchpad.c ${SRC_FILES} ${HEADER_FILES})
 target_include_directories(scratchpad PUBLIC ../include)
+
+# VirtualAllocExShellCode
+add_executable(
+    inject inject.c
+    "../include/VirtualAllocExShellCode.h"
+    "../src/VirtualAllocExShellCode.c"
+)
+target_include_directories(inject PUBLIC ../include)
