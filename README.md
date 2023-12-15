@@ -53,6 +53,52 @@ In visual studio:
 - ctrl+shift+p - `Cmake: Configure`
 - In the new CMake tab, right click `tests.exe` then select `Build`, and then `Run in Terminal`
 
+### Debugging
+
+#### Mac
+
+Add breakpoint in C:
+
+```c
+# If Intel x86/x64
+asm("int3");
+
+# If AArch64
+asm("brk #0x1");
+```
+
+Breakpoint in payload:
+
+```
+# If Intel x86/x64
+\xcc
+
+# If AArch64
+\x40\x00\x20\xD4
+```
+
+Compile target and run with lldb
+
+```
+cmake --build build --target scratchpad && lldb --file ./build/apps/scratchpad
+```
+
+lldb commands:
+
+- `run` - Run the program
+- `bt` - show backtrace
+- `register read` - Show registers
+- Printing 14 bytes of memory that the `x1` register points to
+```
+(lldb) memory read -s1 -c 14 $x1
+0x100004000: 68 65 6c 6c 6f 20 77 6f 72 6c 64 0a 00 2f        hello world../
+```
+- Memory reading from the stack with an expression:
+`````
+(lldb) memory read -s1 -c 14 `$sp - 16`
+`````
+- https://lldb.llvm.org/use/map.html
+
 ### What's present?
 
 - [CMake](https://cmake.org/) setup, with [catch2](https://github.com/catchorg/Catch2) for unit tests
