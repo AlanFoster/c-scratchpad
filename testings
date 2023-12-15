@@ -1,0 +1,27 @@
+mov x5, #0x552f
+movk x5, #0x6573, lsl #16
+movk x5, #0x7372, lsl #32
+movk x5, #0x6a2f, lsl #48
+str x5, [sp, #-48]
+
+mov x5, #0x6e65
+movk x5, #0x696b, lsl #16
+movk x5, #0x736e, lsl #32
+movk x5, #0x742f, lsl #48
+str x5, [sp, #-40]
+
+mov x5, #0x7365
+movk x5, #0x6974, lsl #16
+movk x5, #0x676e, lsl #32
+movk x5, #0x742f, lsl #48
+str x5, [sp, #-32]
+
+mov x5, #0x7365
+movk x5, #0x0074, lsl #16
+movk x5, #0x0000, lsl #32
+movk x5, #0x0000, lsl #48
+str x5, [sp, #-24]
+
+mov x5, sp
+sub x5, x5, #24
+str x5, [sp, #-16]
