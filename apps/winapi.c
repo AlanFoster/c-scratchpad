@@ -1,5 +1,14 @@
 #include <stdio.h>
+#include <winternl.h>
 #include <windows.h>
+#include <ntstatus.h>
+
+typedef NTSTATUS(NTAPI * NT_QUERY_INFORMATION_PROCESS)(
+        IN HANDLE ProcessHandle,
+        IN PROCESSINFOCLASS ProcessInformationClass,
+        OUT PVOID ProcessInformation,
+        IN ULONG ProcessInformationLength,
+        OUT PULONG ReturnLength OPTIONAL);
 
 void printLastError() {
     wchar_t buf[256];
@@ -70,7 +79,63 @@ error:
     return 1;
 }
 
+int queryProcessInformation() {
+    NTSTATUS status;
+    PPROCESS_BASIC_INFORMATION processBasicInformation;
+    DWORD dwSize;
+
+    HMODULE hNtdll;
+    NT_QUERY_INFORMATION_PROCESS hNtQueryInformationProcess;
+
+    hNtdll = LoadLibrary(L"ntdll.dll\0");
+    hNtQueryInformationProcess = (NT_QUERY_INFORMATION_PROCESS) GetProcAddress(hNtdll, "NtQueryInformationProcess");
+
+    // First call to determine the size
+    status = hNtQueryInformationProcess(
+        GetCurrentProcess(),
+        ProcessBasicInformation,
+        NULL,
+        0,
+        &dwSize
+    );
+
+    if (status != STATUS_INFO_LENGTH_MISMATCH) {
+        goto error;
+    }
+
+    // Allocate and clear
+    processBasicInformation = (PPROCESS_BASIC_INFORMATION) malloc(dwSize);
+    RtlZeroMemory(processBasicInformation, dwSize);
+
+    if (!processBasicInformation) {
+        goto error;
+    }
+
+    // Second call to query the required information
+    status = hNtQueryInformationProcess(
+            GetCurrentProcess(),
+            ProcessBasicInformation,
+            processBasicInformation,
+            sizeof(PROCESS_BASIC_INFORMATION),
+            &dwSize
+    );
+
+    if (!NT_SUCCESS(status)) {
+        goto error;
+    }
+
+    printf("PEB base: 0x%p\n", processBasicInformation->PebBaseAddress);
+    free(processBasicInformation);
+
+    return 0;
+
+error:
+    printLastError();
+    return 1;
+}
+
 int main() {
-    createMessageBox();
-    createProcessW();
+//    createMessageBox();
+//    createProcessW();
+    queryProcessInformation();
 }
